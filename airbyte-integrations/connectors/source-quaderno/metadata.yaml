@@ -1,0 +1,25 @@
+data:
+  allowedHosts:
+    hosts:
+      - TODO # Please change to the hostname of the source.
+  registries:
+    oss:
+      enabled: false
+    cloud:
+      enabled: false
+  connectorSubtype: api
+  connectorType: source
+  definitionId: 3de5cb3c-898e-4cea-8c6b-c9b709577593
+  dockerImageTag: 0.1.0
+  dockerRepository: airbyte/source-quaderno
+  githubIssueLabel: source-quaderno
+  icon: quaderno.svg
+  license: MIT
+  name: Quaderno
+  releaseDate: TODO
+  releaseStage: alpha
+  supportLevel: community
+  documentationUrl: https://docs.airbyte.com/integrations/sources/quaderno
+  tags:
+    - language:lowcode
+metadataSpecVersion: "1.0"
