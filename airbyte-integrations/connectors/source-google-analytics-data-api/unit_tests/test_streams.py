@@ -10,19 +10,45 @@ from unittest.mock import MagicMock
 
 import pytest
 from freezegun import freeze_time
-from source_google_analytics_data_api.source import GoogleAnalyticsDataApiBaseStream
+from source_google_analytics_data_api.source import GoogleAnalyticsDataApiBaseStream, SourceGoogleAnalyticsDataApi
 
 from .utils import read_incremental
 
 
 @pytest.fixture
-def patch_base_class(mocker, config):
+def patch_base_class(mocker, config, config_without_date_range):
     # Mock abstract methods to enable instantiating abstract class
     mocker.patch.object(GoogleAnalyticsDataApiBaseStream, "path", f"{random.randint(100000000, 999999999)}:runReport")
     mocker.patch.object(GoogleAnalyticsDataApiBaseStream, "primary_key", "test_primary_key")
     mocker.patch.object(GoogleAnalyticsDataApiBaseStream, "__abstractmethods__", set())
 
-    return {"config": config}
+    return {"config": config, "config_without_date_range": config_without_date_range}
+
+
+def test_json_schema(requests_mock, patch_base_class):
+    requests_mock.register_uri(
+        "POST", "https://oauth2.googleapis.com/token", json={"access_token": "access_token", "expires_in": 3600, "token_type": "Bearer"}
+    )
+    requests_mock.register_uri(
+        "GET",
+        "https://analyticsdata.googleapis.com/v1beta/properties/108176369/metadata",
+        json={
+            "dimensions": [{"apiName": "date"}, {"apiName": "country"}, {"apiName": "language"}, {"apiName": "browser"}],
+            "metrics": [{"apiName": "totalUsers"}, {"apiName": "screenPageViews"}, {"apiName": "sessions"}],
+        },
+    )
+    schema = GoogleAnalyticsDataApiBaseStream(
+        authenticator=MagicMock(), config={"authenticator": MagicMock(), **patch_base_class["config_without_date_range"]}
+    ).get_json_schema()
+
+    for d in patch_base_class["config_without_date_range"]["dimensions"]:
+        assert d in schema["properties"]
+
+    for p in patch_base_class["config_without_date_range"]["metrics"]:
+        assert p in schema["properties"]
+
+    assert "startDate" in schema["properties"]
+    assert "endDate" in schema["properties"]
 
 
 def test_request_params(patch_base_class):
@@ -54,6 +80,7 @@ def test_request_body_json(patch_base_class):
             {"name": "operatingSystem"},
             {"name": "browser"},
         ],
+        "keepEmptyRows": True,
         "dateRanges": [request_body_params["stream_slice"]],
         "returnPropertyQuota": True,
         "offset": str(0),
@@ -137,8 +164,8 @@ def test_parse_response(patch_base_class):
             {
                 "dimensionValues": [{"value": "20220731"}, {"value": "desktop"}, {"value": "Macintosh"}, {"value": "Chrome"}],
                 "metricValues": [
-                    {"value": "344"},
-                    {"value": "169"},
+                    {"value": "344.234"},  # This is a float will be converted to int
+                    {"value": "169.345345"},  # This is a float will be converted to int
                     {"value": "420"},
                     {"value": "1.2209302325581395"},
                     {"value": "194.76313766428572"},
@@ -364,3 +391,54 @@ def test_read_incremental(requests_mock):
         {"property_id": 123, "yearWeek": "202202", "totalUsers": 125, "startDate": "2022-01-09", "endDate": "2022-01-09"},
         {"property_id": 123, "yearWeek": "202202", "totalUsers": 140, "startDate": "2022-01-10", "endDate": "2022-01-10"},
     ]
+
+@pytest.mark.parametrize(
+    "config_dimensions, expected_state",
+    [
+        pytest.param(["browser", "country", "language", "date"], {"date": "20240320"}, id="test_date_no_cursor_field_dimension"),
+        pytest.param(["browser", "country", "language"], {}, id="test_date_cursor_field_dimension"),
+    ]
+)
+def test_get_updated_state(config_dimensions, expected_state):
+    config = {
+      "credentials": {
+        "auth_type": "Service",
+        "credentials_json": "{ \"client_email\": \"a@gmail.com\", \"client_id\": \"1234\", \"client_secret\": \"5678\", \"private_key\": \"5678\"}"
+      },
+      "date_ranges_start_date": "2023-04-01",
+      "window_in_days": 30,
+      "property_ids": ["123"],
+      "custom_reports_array": [
+        {
+          "name": "pivot_report",
+          "dateRanges": [{"startDate": "2020-09-01", "endDate": "2020-09-15"}],
+          "dimensions": config_dimensions,
+          "metrics": ["sessions"],
+          "pivots": [
+            {
+              "fieldNames": ["browser"],
+              "limit": 5
+            },
+            {
+              "fieldNames": ["country"],
+              "limit": 250
+            },
+            {
+              "fieldNames": ["language"],
+              "limit": 15
+            }
+          ],
+          "cohortSpec": {
+            "enabled": "false"
+          }
+        }
+      ]
+    }
+    source = SourceGoogleAnalyticsDataApi()
+    config = source._validate_and_transform(config, report_names=set())
+    config["authenticator"] = source.get_authenticator(config)
+    report_stream = source.instantiate_report_class(config["custom_reports_array"][0], False, config, page_size=100)
+
+    actual_state = report_stream.get_updated_state(current_stream_state={}, latest_record={"date": "20240320"})
+
+    assert actual_state == expected_state

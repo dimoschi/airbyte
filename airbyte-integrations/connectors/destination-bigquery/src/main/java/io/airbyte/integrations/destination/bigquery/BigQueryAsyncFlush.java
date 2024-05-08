@@ -4,12 +4,13 @@
 
 package io.airbyte.integrations.destination.bigquery;
 
+import io.airbyte.cdk.integrations.base.JavaBaseConstants.DestinationColumns;
+import io.airbyte.cdk.integrations.destination.async.function.DestinationFlushFunction;
+import io.airbyte.cdk.integrations.destination.async.model.PartialAirbyteMessage;
 import io.airbyte.cdk.integrations.destination.record_buffer.FileBuffer;
 import io.airbyte.cdk.integrations.destination.record_buffer.SerializableBuffer;
 import io.airbyte.cdk.integrations.destination.s3.csv.CsvSerializedBuffer;
 import io.airbyte.cdk.integrations.destination.s3.csv.StagingDatabaseCsvSheetGenerator;
-import io.airbyte.cdk.integrations.destination_async.DestinationFlushFunction;
-import io.airbyte.cdk.integrations.destination_async.partial_messages.PartialAirbyteMessage;
 import io.airbyte.commons.json.Jsons;
 import io.airbyte.protocol.models.v0.ConfiguredAirbyteCatalog;
 import io.airbyte.protocol.models.v0.StreamDescriptor;
@@ -43,12 +44,12 @@ class BigQueryAsyncFlush implements DestinationFlushFunction {
     try {
       writer = new CsvSerializedBuffer(
           new FileBuffer(CsvSerializedBuffer.CSV_GZ_SUFFIX),
-          new StagingDatabaseCsvSheetGenerator(true),
+          new StagingDatabaseCsvSheetGenerator(DestinationColumns.V2_WITHOUT_META),
           true);
 
       stream.forEach(record -> {
         try {
-          writer.accept(record.getSerialized(), record.getRecord().getEmittedAt());
+          writer.accept(record.getSerialized(), Jsons.serialize(record.getRecord().getMeta()), record.getRecord().getEmittedAt());
         } catch (final Exception e) {
           throw new RuntimeException(e);
         }
@@ -84,12 +85,17 @@ class BigQueryAsyncFlush implements DestinationFlushFunction {
 
   @Override
   public long getOptimalBatchSizeBytes() {
-    // todo(ryankfu): this should be per-destination specific. currently this is for Snowflake.
-    // The size chosen is currently for improving the performance of low memory connectors. With 1 Gi of
-    // resource the connector will usually at most fill up around 150 MB in a single queue. By lowering
-    // the batch size, the AsyncFlusher will flush in smaller batches which allows for memory to be
-    // freed earlier similar to a sliding window effect
-    return 25 * 1024 * 1024;
+    // Chosen arbitrarily (mostly to match legacy behavior). We have no reason to believe a larger
+    // number would be worse.
+    // This was previously set to 25MB, which ran into rate-limiting issues:
+    // https://cloud.google.com/bigquery/quotas#standard_tables
+    // > Your project can make up to 1,500 table modifications per table per day
+    return 200 * 1024 * 1024;
+  }
+
+  @Override
+  public long getQueueFlushThresholdBytes() {
+    return 200 * 1024 * 1024;
   }
 
 }

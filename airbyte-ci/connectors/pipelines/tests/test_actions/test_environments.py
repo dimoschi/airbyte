@@ -2,9 +2,10 @@
 # Copyright (c) 2023 Airbyte, Inc., all rights reserved.
 #
 
+import asyncclick as click
 import pytest
-from pipelines.actions import environments
-from pipelines.contexts import ConnectorContext
+from pipelines.airbyte_ci.connectors.context import ConnectorContext
+from pipelines.dagger.actions.python import common
 
 pytestmark = [
     pytest.mark.anyio,
@@ -18,6 +19,8 @@ def connector_context(dagger_client):
         connector="source-faker",
         git_branch="test",
         git_revision="test",
+        diffed_branch="test",
+        git_repo_url="test",
         report_output_prefix="test",
         is_local=True,
         use_remote_secrets=True,
@@ -33,7 +36,7 @@ async def test_apply_python_development_overrides(connector_context, use_local_c
     before_override_pip_freeze = await fake_connector_container.with_exec(["pip", "freeze"]).stdout()
 
     assert "airbyte-cdk" not in before_override_pip_freeze.splitlines(), "The base image should not have the airbyte-cdk installed."
-    connector_with_overrides = await environments.apply_python_development_overrides(connector_context, fake_connector_container)
+    connector_with_overrides = await common.apply_python_development_overrides(connector_context, fake_connector_container)
 
     after_override_pip_freeze = await connector_with_overrides.with_exec(["pip", "freeze"]).stdout()
     if use_local_cdk:

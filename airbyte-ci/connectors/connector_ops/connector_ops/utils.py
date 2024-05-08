@@ -24,6 +24,7 @@ console = Console()
 
 DIFFED_BRANCH = os.environ.get("DIFFED_BRANCH", "origin/master")
 OSS_CATALOG_URL = "https://connectors.airbyte.com/files/registries/v0/oss_registry.json"
+BASE_AIRBYTE_DOCS_URL = "https://docs.airbyte.com"
 CONNECTOR_PATH_PREFIX = "airbyte-integrations/connectors"
 SOURCE_CONNECTOR_PATH_PREFIX = CONNECTOR_PATH_PREFIX + "/source-"
 DESTINATION_CONNECTOR_PATH_PREFIX = CONNECTOR_PATH_PREFIX + "/destination-"
@@ -50,15 +51,19 @@ TEST_GRADLE_DEPENDENCIES = [
 
 def download_catalog(catalog_url):
     response = requests.get(catalog_url)
+    response.raise_for_status()
     return response.json()
 
 
 OSS_CATALOG = download_catalog(OSS_CATALOG_URL)
 METADATA_FILE_NAME = "metadata.yaml"
+MANIFEST_FILE_NAME = "manifest.yaml"
+DOCKERFILE_FILE_NAME = "Dockerfile"
+PYPROJECT_FILE_NAME = "pyproject.toml"
 ICON_FILE_NAME = "icon.svg"
 
-IMPORTANT_CONNECTOR_THRESHOLDS = {
-    "sl": 300,
+STRATEGIC_CONNECTOR_THRESHOLDS = {
+    "sl": 200,
     "ql": 400,
 }
 
@@ -77,18 +82,6 @@ class ConnectorVersionNotFound(Exception):
 
 def get_connector_name_from_path(path):
     return path.split("/")[2]
-
-
-def get_changed_acceptance_test_config(diff_regex: Optional[str] = None) -> Set[str]:
-    """Retrieve the set of connectors for which the acceptance_test_config file was changed in the current branch (compared to master).
-
-    Args:
-        diff_regex (str): Find the edited files that contain the following regex in their change.
-
-    Returns:
-        Set[Connector]: Set of connectors that were changed
-    """
-    return get_changed_file(ACCEPTANCE_TEST_CONFIG_FILE_NAME, diff_regex)
 
 
 def get_changed_metadata(diff_regex: Optional[str] = None) -> Set[str]:
@@ -276,7 +269,9 @@ class ConnectorLanguageError(Exception):
 class Connector:
     """Utility class to gather metadata about a connector."""
 
-    technical_name: str
+    # Path to the connector directory relative to the CONNECTOR_PATH_PREFIX
+    # e.g source-google-sheets or third-party/farosai/airbyte-pagerduty-source
+    relative_connector_path: str
 
     def _get_type_and_name_from_technical_name(self) -> Tuple[str, str]:
         if "-" not in self.technical_name:
@@ -286,26 +281,57 @@ class Connector:
         return _type, name
 
     @property
+    def technical_name(self) -> str:
+        """
+        Return the technical name of the connector from the given relative_connector_path
+        e.g. source-google-sheets -> source-google-sheets or third-party/farosai/airbyte-pagerduty-source -> airbyte-pagerduty-source
+        """
+        return self.relative_connector_path.split("/")[-1]
+
+    @property
     def name(self):
         return self._get_type_and_name_from_technical_name()[1]
 
     @property
     def connector_type(self) -> str:
-        return self._get_type_and_name_from_technical_name()[0]
+        return self.metadata["connectorType"] if self.metadata else None
 
     @property
-    def documentation_directory(self) -> Path:
+    def is_third_party(self) -> bool:
+        return THIRD_PARTY_GLOB in self.relative_connector_path
+
+    @property
+    def has_airbyte_docs(self) -> bool:
+        return (
+            self.metadata
+            and self.metadata.get("documentationUrl") is not None
+            and BASE_AIRBYTE_DOCS_URL in str(self.metadata.get("documentationUrl"))
+        )
+
+    @property
+    def local_connector_documentation_directory(self) -> Path:
         return Path(f"./docs/integrations/{self.connector_type}s")
 
     @property
-    def documentation_file_path(self) -> Path:
-        readme_file_name = f"{self.name}.md"
-        return self.documentation_directory / readme_file_name
+    def relative_documentation_path_str(self) -> str:
+        documentation_url = self.metadata["documentationUrl"]
+        relative_documentation_path = documentation_url.replace(BASE_AIRBYTE_DOCS_URL, "")
+
+        # strip leading and trailing slashes
+        relative_documentation_path = relative_documentation_path.strip("/")
+
+        return f"./docs/{relative_documentation_path}"
+
+    @property
+    def documentation_file_path(self) -> Optional[Path]:
+        return Path(f"{self.relative_documentation_path_str}.md") if self.has_airbyte_docs else None
 
     @property
     def inapp_documentation_file_path(self) -> Path:
-        readme_file_name = f"{self.name}.inapp.md"
-        return self.documentation_directory / readme_file_name
+        if not self.has_airbyte_docs:
+            return None
+
+        return Path(f"{self.relative_documentation_path_str}.inapp.md")
 
     @property
     def migration_guide_file_name(self) -> str:
@@ -313,7 +339,7 @@ class Connector:
 
     @property
     def migration_guide_file_path(self) -> Path:
-        return self.documentation_directory / self.migration_guide_file_name
+        return self.local_connector_documentation_directory / self.migration_guide_file_name
 
     @property
     def icon_path(self) -> Path:
@@ -322,11 +348,27 @@ class Connector:
 
     @property
     def code_directory(self) -> Path:
-        return Path(f"./airbyte-integrations/connectors/{self.technical_name}")
+        return Path(f"./{CONNECTOR_PATH_PREFIX}/{self.relative_connector_path}")
+
+    @property
+    def python_source_dir_path(self) -> Path:
+        return self.code_directory / self.technical_name.replace("-", "_")
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.python_source_dir_path / MANIFEST_FILE_NAME
 
     @property
     def has_dockerfile(self) -> bool:
-        return (self.code_directory / "Dockerfile").is_file()
+        return self.dockerfile_file_path.is_file()
+
+    @property
+    def dockerfile_file_path(self) -> Path:
+        return self.code_directory / DOCKERFILE_FILE_NAME
+
+    @property
+    def pyproject_file_path(self) -> Path:
+        return self.code_directory / PYPROJECT_FILE_NAME
 
     @property
     def metadata_file_path(self) -> Path:
@@ -345,7 +387,7 @@ class Connector:
             return ConnectorLanguage.LOW_CODE
         if Path(self.code_directory / "setup.py").is_file() or Path(self.code_directory / "pyproject.toml").is_file():
             return ConnectorLanguage.PYTHON
-        if Path(self.code_directory / "src" / "main" / "java").exists():
+        if Path(self.code_directory / "src" / "main" / "java").exists() or Path(self.code_directory / "src" / "main" / "kotlin").exists():
             return ConnectorLanguage.JAVA
         return None
 
@@ -450,16 +492,16 @@ class Connector:
         return ql_value
 
     @property
-    def is_important_connector(self) -> bool:
-        """Check if a connector qualifies as an important connector.
+    def is_strategic_connector(self) -> bool:
+        """Check if a connector qualifies as a strategic connector.
 
         Returns:
             bool: True if the connector is a high value connector, False otherwise.
         """
-        if self.ab_internal_sl >= IMPORTANT_CONNECTOR_THRESHOLDS["sl"]:
+        if self.ab_internal_sl >= STRATEGIC_CONNECTOR_THRESHOLDS["sl"]:
             return True
 
-        if self.ab_internal_ql >= IMPORTANT_CONNECTOR_THRESHOLDS["ql"]:
+        if self.ab_internal_ql >= STRATEGIC_CONNECTOR_THRESHOLDS["ql"]:
             return True
 
         return False
@@ -471,7 +513,7 @@ class Connector:
         Returns:
             bool: True if the connector requires high test strictness level, False otherwise.
         """
-        return self.ab_internal_ql >= IMPORTANT_CONNECTOR_THRESHOLDS["ql"]
+        return self.ab_internal_ql >= STRATEGIC_CONNECTOR_THRESHOLDS["ql"]
 
     @property
     def requires_allowed_hosts_check(self) -> bool:
@@ -521,6 +563,25 @@ class Connector:
     def is_using_poetry(self) -> bool:
         return Path(self.code_directory / "pyproject.toml").exists()
 
+    @property
+    def is_released(self) -> bool:
+        """Pull the the OSS registry and check if it the current definition ID and docker image tag are in the registry.
+        If there is a match it means the connector is released.
+        We use the OSS registry as the source of truth for released connectors as the cloud registry can be a subset of the OSS registry.
+
+        Returns:
+            bool: True if the connector is released, False otherwise.
+        """
+        metadata = self.metadata
+        registry = download_catalog(OSS_CATALOG_URL)
+        for connector in registry[f"{self.connector_type}s"]:
+            if (
+                connector[f"{self.connector_type}DefinitionId"] == metadata["definitionId"]
+                and connector["dockerImageTag"] == metadata["dockerImageTag"]
+            ):
+                return True
+        return False
+
     def get_secret_manager(self, gsm_credentials: str):
         return SecretsManager(connector_name=self.technical_name, gsm_credentials=gsm_credentials)
 
@@ -561,6 +622,26 @@ def get_changed_connectors(
     return {Connector(get_connector_name_from_path(changed_file)) for changed_file in changed_source_connector_files}
 
 
+def _get_relative_connector_folder_name_from_metadata_path(metadata_file_path: str) -> str:
+    """Get the relative connector folder name from the metadata file path.
+
+    Args:
+        metadata_file_path (Path): Path to the metadata file.
+
+    Returns:
+        str: The relative connector folder name.
+    """
+    # remove CONNECTOR_PATH_PREFIX and anything before
+    metadata_file_path = metadata_file_path.split(CONNECTOR_PATH_PREFIX)[-1]
+
+    # remove metadata.yaml
+    metadata_file_path = metadata_file_path.replace(METADATA_FILE_NAME, "")
+
+    # remove leading and trailing slashes
+    metadata_file_path = metadata_file_path.strip("/")
+    return metadata_file_path
+
+
 def get_all_connectors_in_repo() -> Set[Connector]:
     """Retrieve a set of all Connectors in the repo.
     We globe the connectors folder for metadata.yaml files and construct Connectors from the directory name.
@@ -572,11 +653,9 @@ def get_all_connectors_in_repo() -> Set[Connector]:
     repo_path = repo.working_tree_dir
 
     return {
-        Connector(Path(metadata_file).parent.name)
-        for metadata_file in glob(f"{repo_path}/airbyte-integrations/connectors/**/metadata.yaml", recursive=True)
-        # HACK: The Connector util is not good at fetching metadata for third party connectors.
-        # We want to avoid picking a connector that does not have metadata.
-        if SCAFFOLD_CONNECTOR_GLOB not in metadata_file and THIRD_PARTY_GLOB not in metadata_file
+        Connector(_get_relative_connector_folder_name_from_metadata_path(metadata_file))
+        for metadata_file in glob(f"{repo_path}/{CONNECTOR_PATH_PREFIX}/**/metadata.yaml", recursive=True)
+        if SCAFFOLD_CONNECTOR_GLOB not in metadata_file
     }
 
 
@@ -588,3 +667,4 @@ class ConnectorTypeEnum(str, Enum):
 class SupportLevelEnum(str, Enum):
     certified = "certified"
     community = "community"
+    archived = "archived"

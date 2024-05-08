@@ -19,6 +19,20 @@ def test_get_value_from_config():
     assert val == "2022-01-01"
 
 
+@pytest.mark.parametrize(
+    "valid_types, expected_value",
+    [
+        pytest.param((str,), "1234J", id="test_value_is_a_string_if_valid_types_is_str"),
+        pytest.param(None, 1234j, id="test_value_is_interpreted_as_complex_number_by_default"),
+    ],
+)
+def test_get_value_with_complex_number(valid_types, expected_value):
+    s = "{{ config['value'] }}"
+    config = {"value": "1234J"}
+    val = interpolation.eval(s, config, valid_types=valid_types)
+    assert val == expected_value
+
+
 def test_get_value_from_stream_slice():
     s = "{{ stream_slice['date'] }}"
     config = {"date": "2022-01-01"}
@@ -115,6 +129,27 @@ def test_negative_day_delta():
     val = interpolation.eval(delta_template, {})
 
     assert val <= (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=25)).strftime("%Y-%m-%dT%H:%M:%S.%f%z")
+
+
+@pytest.mark.parametrize(
+    "test_name, input_value, expected_output",
+    [
+        ("test_string_to_string", "hello world", "hello world"),
+        ("test_int_to_string", 1, "1"),
+        ("test_number_to_string", 1.52, "1.52"),
+        ("test_true_to_string", True, "true"),
+        ("test_false_to_string", False, "false"),
+        ("test_array_to_string", ["hello", "world"], '["hello", "world"]'),
+        ("test_object_to_array", {"hello": "world"}, '{"hello": "world"}'),
+    ]
+)
+def test_to_string(test_name, input_value, expected_output):
+    interpolation = JinjaInterpolation()
+    config = {"key": input_value}
+    template = "{{ config['key'] | string }}"
+    actual_output = interpolation.eval(template, config, {})
+    assert isinstance(actual_output, str)
+    assert actual_output == expected_output
 
 
 @pytest.mark.parametrize(
@@ -217,6 +252,8 @@ def test_undeclared_variables(template_string, expected_error, expected_value):
             "2021-08-31T00:00:00Z",
             id="test_now_utc_with_duration_and_format",
         ),
+        pytest.param("{{ 1 | string }}", "1", id="test_int_to_string"),
+        pytest.param("{{ [\"hello\", \"world\"] | string }}", "[\"hello\", \"world\"]", id="test_array_to_string"),
     ],
 )
 def test_macros_examples(template_string, expected_value):
